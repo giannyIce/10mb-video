@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Mac MOV to 10MB MP4</title>
+    <title>Perfect 9.9MB Converter</title>
     <script src="https://unpkg.com/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
     <style>
       body {
@@ -13,6 +13,7 @@
         height: 100vh;
         background: #f5f5f7;
         color: #1d1d1f;
+        margin: 0;
       }
       .container {
         background: white;
@@ -37,6 +38,7 @@
       h1 {
         font-size: 24px;
         margin-bottom: 10px;
+        margin-top: 0;
       }
       button {
         background: #0071e3;
@@ -47,14 +49,14 @@
         border-radius: 99px;
         cursor: pointer;
         display: none;
-        margin: 0 auto;
+        margin: 20px auto 0;
       }
       .bar-bg {
         background: #e5e5e5;
         height: 6px;
         border-radius: 3px;
         overflow: hidden;
-        margin-top: 15px;
+        margin-top: 20px;
         display: none;
       }
       .bar-fill {
@@ -67,13 +69,13 @@
         font-size: 12px;
         color: #86868b;
         margin-top: 10px;
-        height: 20px;
+        min-height: 20px;
       }
     </style>
   </head>
   <body>
     <div class="container">
-      <h1>Screen Recording Shrinker</h1>
+      <h1>Perfect 9.9MB Converter</h1>
       <p style="color: #86868b; font-size: 14px">Drag your Mac .mov here</p>
 
       <div class="drop-zone" id="dropArea">Drop .mov file here</div>
@@ -81,7 +83,7 @@
       <div class="bar-bg" id="progressBar">
         <div class="bar-fill" id="progressFill"></div>
       </div>
-      <div class="stats" id="statusText">Target: < 10MB • Time: < 5s</div>
+      <div class="stats" id="statusText">Ready</div>
 
       <button id="dlBtn">Download MP4</button>
     </div>
@@ -93,7 +95,6 @@
       const progressFill = document.getElementById("progressFill");
       const dlBtn = document.getElementById("dlBtn");
 
-      // UI Handlers
       dropArea.ondragover = (e) => {
         e.preventDefault();
         dropArea.style.borderColor = "#0071e3";
@@ -118,38 +119,45 @@
 
         dlBtn.style.display = "none";
         progressBar.style.display = "block";
-        statusText.innerText = "Initializing Hardware Encoder...";
+        progressFill.style.width = "0%";
+        statusText.innerText = "Analyzing Content...";
 
         const video = document.createElement("video");
         video.muted = true;
         video.src = URL.createObjectURL(file);
 
-        // Wait for metadata to load to get dimensions
-        await new Promise((resolve) => {
-          video.onloadedmetadata = () => resolve();
+        await new Promise((r) => {
+          video.onloadedmetadata = r;
         });
-
-        // Use a short timeout to ensure dimensions are ready on some browsers
         await new Promise((r) => setTimeout(r, 100));
 
         const duration = video.duration;
         const srcWidth = video.videoWidth;
         const srcHeight = video.videoHeight;
 
-        // Bitrate Calculation
-        const targetSize = 9.5 * 1024 * 1024;
-        let bitrate = Math.floor((targetSize * 8) / duration);
-        bitrate = Math.max(500000, Math.min(bitrate, 4000000));
+        // --- 1. TARGETING STRATEGY ---
+        // Target 9.5MB for the actual video data.
+        // We leave 0.4MB of "breathing room" so we can PAD it to exactly 9.9MB later.
+        const targetVideoSize = 9.5 * 1024 * 1024;
 
-        // Downscale Logic
-        let targetHeight = 720;
-        if (srcHeight < 720) targetHeight = srcHeight;
+        let budgetBitrate = Math.floor((targetVideoSize * 8) / duration);
+        // Allow extremely high bitrates (up to 50Mbps) so short videos look perfect
+        budgetBitrate = Math.min(budgetBitrate, 50_000_000);
 
+        // --- 2. RESOLUTION (Max Clarity) ---
+        // Support up to 4K (Level 5.1). Only downscale if video is long.
+        let maxHeight = 2160;
+        if (duration > 60) maxHeight = 720;
+        else if (duration > 30) maxHeight = 1080;
+
+        let targetHeight = Math.min(srcHeight, maxHeight);
         let targetWidth = Math.round((srcWidth / srcHeight) * targetHeight);
+
+        // Even numbers only
         targetWidth = targetWidth + (targetWidth % 2);
         targetHeight = targetHeight + (targetHeight % 2);
 
-        statusText.innerText = `Converting: ${srcWidth}x${srcHeight} → ${targetWidth}x${targetHeight}`;
+        statusText.innerText = `Encoding: ${targetWidth}x${targetHeight} @ ${(budgetBitrate / 1000000).toFixed(1)} Mbps`;
 
         const canvas = document.createElement("canvas");
         canvas.width = targetWidth;
@@ -161,7 +169,6 @@
 
         const mp4File = MP4Box.createFile();
         let trackId = null;
-        let encodingError = false; // Flag to stop loop on error
 
         const encoder = new VideoEncoder({
           output: (chunk, meta) => {
@@ -182,73 +189,123 @@
               is_sync: chunk.type === "key",
             });
           },
-          error: (e) => {
-            console.error("Encoder Error", e);
-            encodingError = true;
-            statusText.innerText = `Error: ${e.message}`;
-          },
+          error: (e) => console.error(e),
         });
 
         encoder.configure({
-          codec: "avc1.42002A", // FIXED: Level 4.2 (Supports 1080p+)
+          codec: "avc1.420033", // Level 5.1 (4K Support)
           width: targetWidth,
           height: targetHeight,
-          bitrate: bitrate,
+          bitrate: budgetBitrate,
+          bitrateMode: "constant",
           framerate: 30,
           hardwareAcceleration: "prefer-hardware",
           latencyMode: "realtime",
         });
 
-        const startTime = performance.now();
-        const fps = 30;
-        const interval = 1.0 / fps;
-        let currentTime = 0;
+        video.playbackRate = 4.0;
+        await video.play();
+
         let frameCount = 0;
+        const startTime = performance.now();
+        let lastTime = -1;
+        let isFinished = false;
 
-        while (currentTime < duration) {
-          if (encodingError) break;
-
-          video.currentTime = currentTime;
-
-          await new Promise((r) => {
-            const onSeek = () => {
-              video.removeEventListener("seeked", onSeek);
-              r();
-            };
-            video.addEventListener("seeked", onSeek);
-          });
-
-          ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-
-          const frame = new VideoFrame(canvas, {
-            timestamp: currentTime * 1000000,
-            duration: interval * 1000000,
-          });
-
-          if (encoder.state === "configured") {
-            encoder.encode(frame, { keyFrame: frameCount % 60 === 0 });
+        function processFrame(now, metadata) {
+          if (isFinished) return;
+          if (video.ended || video.paused) {
+            finish();
+            return;
           }
-          frame.close(); // Important: Close frame to prevent garbage collection errors
 
-          const percent = (currentTime / duration) * 100;
-          progressFill.style.width = `${percent}%`;
+          if (metadata.mediaTime !== lastTime) {
+            lastTime = metadata.mediaTime;
+            ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
-          currentTime += interval;
-          frameCount++;
+            if (encoder.encodeQueueSize < 5) {
+              const frame = new VideoFrame(canvas, {
+                timestamp: metadata.mediaTime * 1000000,
+                duration: 33333,
+              });
+
+              // Frequent keyframes for clarity
+              const keyInterval = budgetBitrate > 10000000 ? 15 : 60;
+              encoder.encode(frame, {
+                keyFrame: frameCount % keyInterval === 0,
+              });
+              frame.close();
+              frameCount++;
+            }
+            const percent = Math.min(
+              100,
+              (metadata.mediaTime / duration) * 100,
+            );
+            progressFill.style.width = `${percent}%`;
+          }
+          video.requestVideoFrameCallback(processFrame);
         }
 
-        if (!encodingError) {
+        video.onended = () => {
+          if (!isFinished) finish();
+        };
+        video.requestVideoFrameCallback(processFrame);
+
+        async function finish() {
+          if (isFinished) return;
+          isFinished = true;
+          statusText.innerText = "Applying Size Padding...";
+
           await encoder.flush();
-          const blob = new Blob([mp4File.getBuffer()], { type: "video/mp4" });
+
+          // 1. Get the compressed video blob
+          const rawBlob = new Blob([mp4File.getBuffer()], {
+            type: "video/mp4",
+          });
+
+          // 2. CALCULATE PADDING NEEDED
+          // We want exactly 9.9 MB (10,380,902 bytes)
+          const targetTotalBytes = 9.9 * 1024 * 1024;
+          const currentBytes = rawBlob.size;
+          const paddingNeeded = targetTotalBytes - currentBytes;
+
+          let finalBlob = rawBlob;
+
+          // Only pad if we are UNDER the limit and need > 8 bytes (min box size)
+          if (paddingNeeded > 8) {
+            // Create a "free" box
+            // 4 bytes size, 4 bytes type ('free'), N bytes zeroes
+            const paddingBuffer = new Uint8Array(paddingNeeded);
+            const view = new DataView(paddingBuffer.buffer);
+
+            // Write 32-bit Size (Big Endian)
+            view.setUint32(0, paddingNeeded, false);
+
+            // Write Type 'free' (0x66726565)
+            view.setUint8(4, 0x66); // f
+            view.setUint8(5, 0x72); // r
+            view.setUint8(6, 0x65); // e
+            view.setUint8(7, 0x65); // e
+
+            // The rest is already zeroes (Uint8Array default)
+
+            // Combine: Video + Padding
+            finalBlob = new Blob([rawBlob, paddingBuffer], {
+              type: "video/mp4",
+            });
+            console.log(`Padded with ${paddingNeeded} bytes.`);
+          }
+
           const finalTime = ((performance.now() - startTime) / 1000).toFixed(1);
 
-          statusText.innerText = `✅ Done in ${finalTime}s • Size: ${(blob.size / 1024 / 1024).toFixed(2)} MB`;
+          statusText.innerText = `✅ Perfect Match: ${finalTime}s • ${(finalBlob.size / 1024 / 1024).toFixed(2)} MB`;
+          progressFill.style.width = "100%";
+
           dlBtn.style.display = "block";
           dlBtn.innerText = "Download MP4";
           dlBtn.onclick = () => {
             const a = document.createElement("a");
-            a.href = URL.createObjectURL(blob);
-            a.download = `converted_${Date.now()}.mp4`;
+            a.href = URL.createObjectURL(finalBlob);
+            a.download = `perfect_${Date.now()}.mp4`;
             a.click();
           };
         }
