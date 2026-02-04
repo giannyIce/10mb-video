@@ -116,41 +116,41 @@
       async function handleFile(file) {
         if (!file) return;
 
-        // Reset UI
         dlBtn.style.display = "none";
         progressBar.style.display = "block";
         statusText.innerText = "Initializing Hardware Encoder...";
 
-        // 1. Prepare Video Element (The Decoder)
         const video = document.createElement("video");
         video.muted = true;
         video.src = URL.createObjectURL(file);
-        await video.play(); // Required to get dimensions
+
+        // Wait for metadata to load to get dimensions
+        await new Promise((resolve) => {
+          video.onloadedmetadata = () => resolve();
+        });
+
+        // Use a short timeout to ensure dimensions are ready on some browsers
+        await new Promise((r) => setTimeout(r, 100));
 
         const duration = video.duration;
         const srcWidth = video.videoWidth;
         const srcHeight = video.videoHeight;
 
-        // 2. Calculate "Safe" Bitrate (Max 9.5MB file size)
-        // Formula: (9.5MB * 8 bits) / duration_seconds
+        // Bitrate Calculation
         const targetSize = 9.5 * 1024 * 1024;
         let bitrate = Math.floor((targetSize * 8) / duration);
-        // Cap bitrate: Min 500kbps (quality floor), Max 4Mbps (speed ceiling)
         bitrate = Math.max(500000, Math.min(bitrate, 4000000));
 
-        // 3. Retina Downscale Logic (CRITICAL FOR SPEED)
-        // Mac screens are huge. We scale to 720p height max to ensure < 5s processing.
+        // Downscale Logic
         let targetHeight = 720;
         if (srcHeight < 720) targetHeight = srcHeight;
-        // Keep aspect ratio
+
         let targetWidth = Math.round((srcWidth / srcHeight) * targetHeight);
-        // Ensure even numbers (required by H.264)
         targetWidth = targetWidth + (targetWidth % 2);
         targetHeight = targetHeight + (targetHeight % 2);
 
         statusText.innerText = `Converting: ${srcWidth}x${srcHeight} → ${targetWidth}x${targetHeight}`;
 
-        // 4. Set up Canvas & Encoder
         const canvas = document.createElement("canvas");
         canvas.width = targetWidth;
         canvas.height = targetHeight;
@@ -161,6 +161,7 @@
 
         const mp4File = MP4Box.createFile();
         let trackId = null;
+        let encodingError = false; // Flag to stop loop on error
 
         const encoder = new VideoEncoder({
           output: (chunk, meta) => {
@@ -181,11 +182,15 @@
               is_sync: chunk.type === "key",
             });
           },
-          error: (e) => console.error("Encoder Error", e),
+          error: (e) => {
+            console.error("Encoder Error", e);
+            encodingError = true;
+            statusText.innerText = `Error: ${e.message}`;
+          },
         });
 
         encoder.configure({
-          codec: "avc1.42001E", // H.264 Constrained Baseline (Fastest)
+          codec: "avc1.42002A", // FIXED: Level 4.2 (Supports 1080p+)
           width: targetWidth,
           height: targetHeight,
           bitrate: bitrate,
@@ -194,19 +199,17 @@
           latencyMode: "realtime",
         });
 
-        // 5. The "Fast Forward" Loop
         const startTime = performance.now();
         const fps = 30;
         const interval = 1.0 / fps;
         let currentTime = 0;
         let frameCount = 0;
 
-        // "Seek" method is faster than "Play" for downscaling huge jumps
-        // We manually step through the video file.
         while (currentTime < duration) {
+          if (encodingError) break;
+
           video.currentTime = currentTime;
 
-          // Wait for seek to finish
           await new Promise((r) => {
             const onSeek = () => {
               video.removeEventListener("seeked", onSeek);
@@ -215,7 +218,6 @@
             video.addEventListener("seeked", onSeek);
           });
 
-          // Draw & Encode
           ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
           const frame = new VideoFrame(canvas, {
@@ -223,38 +225,33 @@
             duration: interval * 1000000,
           });
 
-          // Keyframe every 2 seconds (60 frames)
-          encoder.encode(frame, { keyFrame: frameCount % 60 === 0 });
-          frame.close();
+          if (encoder.state === "configured") {
+            encoder.encode(frame, { keyFrame: frameCount % 60 === 0 });
+          }
+          frame.close(); // Important: Close frame to prevent garbage collection errors
 
-          // Progress Bar
           const percent = (currentTime / duration) * 100;
           progressFill.style.width = `${percent}%`;
 
-          // Step forward
           currentTime += interval;
           frameCount++;
-
-          // Emergency Bailout: If we exceed 5 seconds of REAL time, stop?
-          // Optional: Uncomment below to force stop at 5s mark regardless of completion
-          // if (performance.now() - startTime > 5000) break;
         }
 
-        await encoder.flush();
+        if (!encodingError) {
+          await encoder.flush();
+          const blob = new Blob([mp4File.getBuffer()], { type: "video/mp4" });
+          const finalTime = ((performance.now() - startTime) / 1000).toFixed(1);
 
-        // Finalize
-        const blob = new Blob([mp4File.getBuffer()], { type: "video/mp4" });
-        const finalTime = ((performance.now() - startTime) / 1000).toFixed(1);
-
-        statusText.innerText = `✅ Done in ${finalTime}s • Size: ${(blob.size / 1024 / 1024).toFixed(2)} MB`;
-        dlBtn.style.display = "block";
-        dlBtn.innerText = "Download MP4";
-        dlBtn.onclick = () => {
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = `converted_${Date.now()}.mp4`;
-          a.click();
-        };
+          statusText.innerText = `✅ Done in ${finalTime}s • Size: ${(blob.size / 1024 / 1024).toFixed(2)} MB`;
+          dlBtn.style.display = "block";
+          dlBtn.innerText = "Download MP4";
+          dlBtn.onclick = () => {
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = `converted_${Date.now()}.mp4`;
+            a.click();
+          };
+        }
       }
     </script>
   </body>
